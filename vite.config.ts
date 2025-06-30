@@ -9,8 +9,12 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      // 🔁 Forward all `/api/*` requests to the backend running on port 3001
-      '/api': 'http://localhost:3000',
+      // Forward all `/api/*` requests to the backend running on port 3000
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+        secure: false,
+      },
     },
   },
 });

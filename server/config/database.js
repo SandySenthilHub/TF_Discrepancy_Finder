@@ -30,11 +30,21 @@ const getPool = () => {
     poolPromise = new sql.ConnectionPool(config)
       .connect()
       .then(pool => {
-        console.log('Connected to Azure SQL Server - TF_genie database');
+        console.log('✅ Connected to Azure SQL Server - TF_genie database');
+        console.log(`📍 Server: ${config.server}`);
+        console.log(`🗄️  Database: ${config.database}`);
+        console.log(`👤 User: ${config.user}`);
         return pool;
       })
       .catch(err => {
-        console.error('Database connection failed:', err);
+        console.error('❌ Database connection failed:', err.message);
+        console.error('🔧 Connection details:');
+        console.error(`   Server: ${config.server}`);
+        console.error(`   Database: ${config.database}`);
+        console.error(`   User: ${config.user}`);
+        console.error(`   Port: ${config.port}`);
+        console.error(`   Encrypt: ${config.options.encrypt}`);
+        console.error(`   Trust Certificate: ${config.options.trustServerCertificate}`);
         poolPromise = null;
         throw err;
       });
@@ -42,4 +52,18 @@ const getPool = () => {
   return poolPromise;
 };
 
-export { sql, getPool };
+// Test connection function
+const testConnection = async () => {
+  try {
+    const pool = await getPool();
+    const result = await pool.request().query('SELECT 1 as test');
+    console.log('🧪 Database connection test: SUCCESS');
+    return true;
+  } catch (error) {
+    console.error('🧪 Database connection test: FAILED');
+    console.error('Error:', error.message);
+    return false;
+  }
+};
+
+export { sql, getPool, testConnection };
