@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "server": "nodemon server/index.js",
     "full-dev": "concurrently \"npm run server\" \"npm run dev\"",
-    "setup-db": "node server/scripts/runDatabaseSetup.js",
+    "setup-db": "node server/scripts/setupDatabase.js",
+    "test-db": "node server/scripts/testConnection.js",
     "create-db": "node server/scripts/runDatabaseSetup.js"
   },
   "dependencies": {
