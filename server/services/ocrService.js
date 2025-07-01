@@ -80,7 +80,7 @@ export const processDocument = async (documentId) => {
     const structuredData = splitFormByType(extractedText, documentType);
 
     // Extract fields based on document type
-    const extractedFields = extractFieldsByType(extractedText, documentType);
+    const extractedFields = extractFieldsByType(extractedText, documentType, documentId);
 
     console.log(`Extracted ${extractedFields.length} fields`);
 
@@ -109,12 +109,15 @@ export const processDocument = async (documentId) => {
     console.log(`OCR processing completed for document: ${documentId}`);
 
     return {
-      documentId: documentId,
-      extractedText: extractedText,
-      documentType: documentType,
-      extractedFields: extractedFields,
-      structuredData: structuredData,
-      confidence: calculateOverallConfidence(extractedFields)
+      success: true,
+      data: {
+        documentId: documentId,
+        extractedText: extractedText,
+        documentType: documentType,
+        extractedFields: extractedFields,
+        structuredData: structuredData,
+        confidence: calculateOverallConfidence(extractedFields)
+      }
     };
 
   } catch (error) {
@@ -157,16 +160,16 @@ const performImageOCR = async (filePath) => {
   }
 };
 
-import { runPythonOCR } from './pythonRunner.js'; // Adjust the path if needed
+import { runPythonOCR } from './pythonRunner.js';
 
 const performPDFOCR = async (filePath) => {
   try {
     console.log(`Calling Python OCR for: ${filePath}`);
     
     const uploadsDir = process.env.UPLOAD_PATH || './uploads';
-    const fullPath = path.resolve(uploadsDir, filePath);  // ✅ absolute path
+    const fullPath = path.resolve(uploadsDir, filePath);
 
-    const extractedText = await runPythonOCR(fullPath);   // 👈 call Python
+    const extractedText = await runPythonOCR(fullPath);
     return extractedText;
 
   } catch (error) {
@@ -174,9 +177,6 @@ const performPDFOCR = async (filePath) => {
     throw new Error(`Failed to extract text from PDF via Python: ${error}`);
   }
 };
-
-
-
 
 const generateMockOCRText = (fileName) => {
   const name = fileName.toLowerCase();
@@ -400,10 +400,10 @@ const splitGenericDocument = (lines) => {
   ];
 };
 
-const extractFieldsByType = (text, documentType) => {
+const extractFieldsByType = (text, documentType, documentId) => {
   const template = DOCUMENT_TEMPLATES[documentType];
   if (!template) {
-    return extractGenericFields(text);
+    return extractGenericFields(text, documentId);
   }
 
   const extractedFields = [];
@@ -413,17 +413,22 @@ const extractFieldsByType = (text, documentType) => {
     const fieldValue = extractFieldValue(text, fieldName);
     if (fieldValue) {
       extractedFields.push({
-        id: `field_${Date.now()}_${index}`,
-        documentId: 'temp', // This would be set properly
+        id: `field_${documentId}_${index}`,
+        documentId: documentId,
         fieldName: fieldName,
         fieldValue: fieldValue,
         confidence: calculateFieldConfidence(fieldValue, fieldName),
-        position: { x: 0, y: index * 30, width: 200, height: 25 }, // Mock position
+        position: { x: 0, y: index * 30, width: 200, height: 25 },
         isValidated: false,
         isEdited: false
       });
     }
   });
+
+  // If no fields were extracted using templates, fall back to generic extraction
+  if (extractedFields.length === 0) {
+    return extractGenericFields(text, documentId);
+  }
 
   return extractedFields;
 };
@@ -456,7 +461,7 @@ const extractFieldValue = (text, fieldName) => {
   return match ? match[1].trim() : null;
 };
 
-const extractGenericFields = (text) => {
+const extractGenericFields = (text, documentId) => {
   const lines = text.split('\n').filter(line => line.trim());
   const fields = [];
 
@@ -465,8 +470,8 @@ const extractGenericFields = (text) => {
       const [key, value] = line.split(':').map(s => s.trim());
       if (key && value && value.length > 0) {
         fields.push({
-          id: `generic_field_${Date.now()}_${index}`,
-          documentId: 'temp',
+          id: `generic_field_${documentId}_${index}`,
+          documentId: documentId,
           fieldName: key,
           fieldValue: value,
           confidence: 0.7,
@@ -522,8 +527,8 @@ export const reprocessDocument = async (documentId) => {
         id: `iteration_${Date.now()}`,
         documentId: documentId,
         iterationNumber: 1, // This would be incremented properly
-        ocrResult: result.extractedText,
-        extractedFields: result.extractedFields,
+        ocrResult: result.data.extractedText,
+        extractedFields: result.data.extractedFields,
         createdAt: new Date().toISOString(),
         status: 'completed'
       }
