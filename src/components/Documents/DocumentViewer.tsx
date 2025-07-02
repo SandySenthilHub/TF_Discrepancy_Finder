@@ -14,6 +14,13 @@ interface DocumentViewerProps {
   onClose: () => void;
 }
 
+interface ProcessingProgress {
+  stage: string;
+  progress: number;
+  message: string;
+  timestamp: string;
+}
+
 const DocumentViewer: React.FC<DocumentViewerProps> = ({ documentId, onClose }) => {
   const { documents } = useDocumentStore();
   const [zoom, setZoom] = useState(100);
@@ -22,7 +29,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ documentId, onClose }) 
   const [ocrData, setOcrData] = useState<any>(null);
   const [isLoadingOCR, setIsLoadingOCR] = useState(false);
   const [showSplitViewer, setShowSplitViewer] = useState(false);
-  const [processingProgress, setProcessingProgress] = useState(0);
+  const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
   const [numPages, setNumPages] = useState<number | null>(null);
@@ -38,6 +45,50 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ documentId, onClose }) 
       loadOCRData();
     }
   }, [showOCRText, documentId]);
+
+  // Poll for processing progress
+  useEffect(() => {
+    let progressInterval: NodeJS.Timeout;
+    
+    if (isProcessing || (document && document.status === 'processing')) {
+      progressInterval = setInterval(async () => {
+        try {
+          const response = await fetch(`/api/documents/${documentId}/progress`, {
+            headers: {
+              'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
+            }
+          });
+          
+          if (response.ok) {
+            const progress = await response.json();
+            setProcessingProgress(progress);
+            
+            // Stop polling when processing is complete or failed
+            if (progress.stage === 'completed' || progress.stage === 'error') {
+              setIsProcessing(false);
+              clearInterval(progressInterval);
+              
+              // Reload OCR data if completed successfully
+              if (progress.stage === 'completed') {
+                setTimeout(() => {
+                  loadOCRData();
+                  window.location.reload(); // Refresh to update document status
+                }, 1000);
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error fetching progress:', error);
+        }
+      }, 1000); // Poll every second
+    }
+    
+    return () => {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+      }
+    };
+  }, [isProcessing, document?.status, documentId]);
 
   const loadOCRData = async () => {
     setIsLoadingOCR(true);
@@ -71,41 +122,38 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ documentId, onClose }) 
     if (!document) return;
 
     setIsProcessing(true);
-    setProcessingProgress(0);
-    
-    // Simulate progress updates
-    const progressInterval = setInterval(() => {
-      setProcessingProgress(prev => {
-        if (prev >= 90) {
-          clearInterval(progressInterval);
-          return 90;
-        }
-        return prev + 10;
-      });
-    }, 500);
+    setProcessingProgress({
+      stage: 'starting',
+      progress: 0,
+      message: 'Starting document processing...',
+      timestamp: new Date().toISOString()
+    });
 
     try {
-      const result = await ocrAPI.processDocument(documentId);
-      
-      // Complete progress
-      setProcessingProgress(100);
-      
-      // Load OCR data after processing
-      setTimeout(async () => {
-        await loadOCRData();
-        // Refresh the page to update document status
-        window.location.reload();
-      }, 1000);
-      
+      const response = await fetch(`/api/documents/${documentId}/process`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log('Processing started:', result);
+        // Progress polling will handle the rest
+      } else {
+        throw new Error('Failed to start processing');
+      }
     } catch (error) {
       console.error('Error processing document:', error);
-      clearInterval(progressInterval);
-      setProcessingProgress(0);
-    } finally {
-      setTimeout(() => {
-        setIsProcessing(false);
-        setProcessingProgress(0);
-      }, 2000);
+      setIsProcessing(false);
+      setProcessingProgress({
+        stage: 'error',
+        progress: 0,
+        message: `Processing failed: ${error.message}`,
+        timestamp: new Date().toISOString()
+      });
     }
   };
 
@@ -125,6 +173,21 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ documentId, onClose }) 
   };
 
   const hasSplitDocuments = ocrData?.splitDocuments && ocrData.splitDocuments.length > 1;
+
+  const getProgressColor = (stage: string) => {
+    switch (stage) {
+      case 'completed': return 'bg-green-500';
+      case 'error': return 'bg-red-500';
+      case 'processing': return 'bg-blue-500';
+      default: return 'bg-yellow-500';
+    }
+  };
+
+  const getProgressMessage = (progress: ProcessingProgress) => {
+    if (progress.progress === 100) return 'Processing completed successfully!';
+    if (progress.stage === 'error') return progress.message;
+    return progress.message || 'Processing...';
+  };
 
   return (
     <>
@@ -206,24 +269,34 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ documentId, onClose }) 
           </div>
 
           {/* Processing Progress */}
-          {isProcessing && (
-            <div className="px-6 py-4 border-b border-slate-200 bg-blue-50">
+          {(isProcessing || processingProgress) && (
+            <div className="px-6 py-4 border-b border-slate-200 bg-gradient-to-r from-blue-50 to-indigo-50">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-blue-900">Processing Document...</span>
-                <span className="text-sm text-blue-700">{processingProgress}%</span>
+                <span className="text-sm font-medium text-blue-900">
+                  {processingProgress?.stage === 'completed' ? 'Processing Complete!' : 
+                   processingProgress?.stage === 'error' ? 'Processing Failed' : 
+                   'Processing Document...'}
+                </span>
+                <span className="text-sm text-blue-700">
+                  {processingProgress?.progress || 0}%
+                </span>
               </div>
-              <div className="w-full bg-blue-200 rounded-full h-2">
+              <div className="w-full bg-blue-200 rounded-full h-3 overflow-hidden">
                 <div 
-                  className="bg-blue-600 h-2 rounded-full transition-all duration-500"
-                  style={{ width: `${processingProgress}%` }}
+                  className={`h-3 rounded-full transition-all duration-500 ${getProgressColor(processingProgress?.stage || 'processing')}`}
+                  style={{ width: `${processingProgress?.progress || 0}%` }}
                 />
               </div>
-              <p className="text-xs text-blue-700 mt-1">
-                {processingProgress < 30 ? 'Extracting text...' :
-                 processingProgress < 60 ? 'Analyzing document structure...' :
-                 processingProgress < 90 ? 'Splitting by form type...' :
-                 'Finalizing...'}
-              </p>
+              <div className="flex items-center justify-between mt-2">
+                <p className="text-xs text-blue-700">
+                  {processingProgress ? getProgressMessage(processingProgress) : 'Initializing...'}
+                </p>
+                {processingProgress?.timestamp && (
+                  <p className="text-xs text-blue-600">
+                    {new Date(processingProgress.timestamp).toLocaleTimeString()}
+                  </p>
+                )}
+              </div>
             </div>
           )}
 

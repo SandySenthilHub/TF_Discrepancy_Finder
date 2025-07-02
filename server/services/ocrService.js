@@ -8,6 +8,18 @@ import { splitDocumentByFormType } from './documentSplitter.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Import progress update function
+let updateProgress;
+try {
+  const documentsModule = await import('../routes/documents.js');
+  updateProgress = documentsModule.updateProgress;
+} catch (error) {
+  console.warn('Could not import updateProgress function:', error.message);
+  updateProgress = (documentId, stage, progress, message) => {
+    console.log(`Progress: ${documentId} - ${stage} (${progress}%) - ${message}`);
+  };
+}
+
 // Mock document templates for recognition
 const DOCUMENT_TEMPLATES = {
   'Letter of Credit': {
@@ -39,6 +51,7 @@ const DOCUMENT_TEMPLATES = {
 export const processDocument = async (documentId) => {
   try {
     console.log(`Starting OCR processing for document: ${documentId}`);
+    updateProgress(documentId, 'processing', 15, 'Initializing OCR processing...');
     
     // Get document details from database
     const document = await DocumentModel.getDocumentById(documentId);
@@ -48,6 +61,7 @@ export const processDocument = async (documentId) => {
     }
 
     console.log(`Processing document: ${document.fileName} (${document.fileType})`);
+    updateProgress(documentId, 'processing', 20, 'Loading document...');
 
     // Update status to processing
     await DocumentModel.updateDocumentStatus(documentId, 'processing');
@@ -56,28 +70,35 @@ export const processDocument = async (documentId) => {
     let extractedText = '';
     
     try {
+      updateProgress(documentId, 'processing', 30, 'Extracting text from document...');
+      
       if (document.fileType.startsWith('image/')) {
         console.log('Processing image file with Tesseract...');
-        extractedText = await performImageOCR(document.filePath);
+        extractedText = await performImageOCR(document.filePath, documentId);
       } else if (document.fileType === 'application/pdf') {
         console.log('Processing PDF file...');
-        extractedText = await performPDFOCR(document.filePath);
+        extractedText = await performPDFOCR(document.filePath, documentId);
       } else {
         throw new Error('Unsupported file type for OCR');
       }
     } catch (ocrError) {
       console.error('OCR processing failed, using mock data:', ocrError.message);
+      updateProgress(documentId, 'processing', 40, 'OCR failed, generating sample data...');
       // Use mock data for demonstration
       extractedText = generateMockOCRText(document.fileName);
     }
 
     console.log(`Extracted text length: ${extractedText.length} characters`);
+    updateProgress(documentId, 'processing', 60, 'Analyzing document structure...');
 
     // Split document by form type
     console.log('Starting document splitting by form type...');
+    updateProgress(documentId, 'processing', 70, 'Splitting document by form types...');
+    
     const splitResult = await splitDocumentByFormType(documentId, extractedText);
     
     console.log(`Document split into ${splitResult.splitCount} sections`);
+    updateProgress(documentId, 'processing', 85, `Split into ${splitResult.splitCount} documents`);
 
     // Process each split document
     const processedSplits = [];
@@ -90,11 +111,13 @@ export const processDocument = async (documentId) => {
       processedSplits.push(processedSplit);
     }
 
+    updateProgress(documentId, 'processing', 90, 'Extracting fields and finalizing...');
+
     // Save cleaned document data with split information
     const cleanedData = {
       documentId: documentId,
       sessionId: document.sessionId,
-      cleanedContent: extractedText,
+      cleanedContent: splitResult.splitCount > 1 ? JSON.stringify(processedSplits) : extractedText,
       extractedFields: splitResult.splitDocuments.flatMap(doc => 
         doc.extractedFields.map((field, index) => ({
           ...field,
@@ -121,6 +144,7 @@ export const processDocument = async (documentId) => {
 
     // Update document status to processed
     await DocumentModel.updateDocumentStatus(documentId, 'processed');
+    updateProgress(documentId, 'completed', 100, 'Processing completed successfully');
 
     console.log(`OCR processing completed for document: ${documentId}`);
 
@@ -138,6 +162,7 @@ export const processDocument = async (documentId) => {
 
   } catch (error) {
     console.error('OCR processing error:', error);
+    updateProgress(documentId, 'error', 0, `Processing failed: ${error.message}`);
     try {
       await DocumentModel.updateDocumentStatus(documentId, 'error');
     } catch (updateError) {
@@ -147,7 +172,7 @@ export const processDocument = async (documentId) => {
   }
 };
 
-const performImageOCR = async (filePath) => {
+const performImageOCR = async (filePath, documentId) => {
   try {
     // Construct the full file path
     const uploadsDir = process.env.UPLOAD_PATH || './uploads';
@@ -164,7 +189,10 @@ const performImageOCR = async (filePath) => {
     const { data: { text } } = await Tesseract.recognize(fullPath, 'eng', {
       logger: m => {
         if (m.status === 'recognizing text') {
-          console.log(`OCR Progress: ${Math.round(m.progress * 100)}%`);
+          const progress = Math.round(m.progress * 100);
+          const overallProgress = 30 + Math.round(progress * 0.3); // Map to 30-60% range
+          updateProgress(documentId, 'processing', overallProgress, `OCR Progress: ${progress}%`);
+          console.log(`OCR Progress: ${progress}%`);
         }
       }
     });
@@ -178,14 +206,16 @@ const performImageOCR = async (filePath) => {
 
 import { runPythonOCR } from './pythonRunner.js';
 
-const performPDFOCR = async (filePath) => {
+const performPDFOCR = async (filePath, documentId) => {
   try {
     console.log(`Calling Python OCR for: ${filePath}`);
+    updateProgress(documentId, 'processing', 35, 'Processing PDF with Python OCR...');
     
     const uploadsDir = process.env.UPLOAD_PATH || './uploads';
     const fullPath = path.resolve(uploadsDir, filePath);
 
     const extractedText = await runPythonOCR(fullPath);
+    updateProgress(documentId, 'processing', 55, 'PDF text extraction completed');
     return extractedText;
 
   } catch (error) {
@@ -474,6 +504,7 @@ const calculateOverallConfidence = (fields) => {
 export const reprocessDocument = async (documentId) => {
   try {
     console.log(`Reprocessing document: ${documentId}`);
+    updateProgress(documentId, 'reprocessing', 10, 'Starting reprocessing...');
     
     // Increment iteration count
     // This would typically update the iteration in the database
@@ -495,6 +526,7 @@ export const reprocessDocument = async (documentId) => {
     };
   } catch (error) {
     console.error('Reprocessing error:', error);
+    updateProgress(documentId, 'error', 0, `Reprocessing failed: ${error.message}`);
     throw error;
   }
 };

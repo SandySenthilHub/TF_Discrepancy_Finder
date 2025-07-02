@@ -10,7 +10,8 @@ import {
   Plus,
   FolderOpen,
   Clock,
-  CheckCircle2
+  CheckCircle2,
+  RefreshCw
 } from 'lucide-react';
 import { useSessionStore } from '../store/sessionStore';
 import { useAuthStore } from '../store/authStore';
@@ -18,9 +19,16 @@ import { useAuthStore } from '../store/authStore';
 interface UploadedFile {
   file: File;
   id: string;
-  status: 'pending' | 'uploading' | 'success' | 'error';
+  status: 'pending' | 'uploading' | 'success' | 'error' | 'processing';
   progress: number;
   error?: string;
+  documentId?: string;
+  processingProgress?: {
+    stage: string;
+    progress: number;
+    message: string;
+    timestamp: string;
+  };
 }
 
 const Upload: React.FC = () => {
@@ -39,6 +47,46 @@ const Upload: React.FC = () => {
   useEffect(() => {
     loadSessions();
   }, [loadSessions]);
+
+  // Poll for processing progress of uploaded files
+  useEffect(() => {
+    const processingFiles = uploadedFiles.filter(f => 
+      f.status === 'processing' && f.documentId
+    );
+
+    if (processingFiles.length === 0) return;
+
+    const progressInterval = setInterval(async () => {
+      for (const file of processingFiles) {
+        try {
+          const response = await fetch(`/api/documents/${file.documentId}/progress`, {
+            headers: {
+              'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
+            }
+          });
+          
+          if (response.ok) {
+            const progress = await response.json();
+            
+            setUploadedFiles(prev => prev.map(f => 
+              f.id === file.id 
+                ? { 
+                    ...f, 
+                    processingProgress: progress,
+                    status: progress.stage === 'completed' ? 'success' : 
+                           progress.stage === 'error' ? 'error' : 'processing'
+                  }
+                : f
+            ));
+          }
+        } catch (error) {
+          console.error('Error fetching progress for file:', file.id, error);
+        }
+      }
+    }, 2000); // Poll every 2 seconds
+
+    return () => clearInterval(progressInterval);
+  }, [uploadedFiles]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     accept: {
@@ -60,7 +108,6 @@ const Upload: React.FC = () => {
       rejectedFiles.forEach(rejection => {
         const error = rejection.errors[0]?.message || 'File rejected';
         console.error('File rejected:', rejection.file.name, error);
-        // You could show a toast notification here
       });
     }
   });
@@ -81,7 +128,6 @@ const Upload: React.FC = () => {
       setNewSession({ cifNumber: '', lcNumber: '', lifecycle: '' });
     } catch (error) {
       console.error('Error creating session:', error);
-      // You could show an error toast here
     }
   };
 
@@ -102,7 +148,7 @@ const Upload: React.FC = () => {
           )
         );
 
-        // Simulate progress updates
+        // Simulate upload progress
         const progressInterval = setInterval(() => {
           setUploadedFiles(prev => 
             prev.map(f => 
@@ -114,14 +160,25 @@ const Upload: React.FC = () => {
         }, 200);
 
         // Upload the file
-        await uploadDocument(selectedSessionId, uploadFile.file);
+        const result = await uploadDocument(selectedSessionId, uploadFile.file);
 
-        // Clear progress interval and mark as success
+        // Clear progress interval and mark as processing
         clearInterval(progressInterval);
         setUploadedFiles(prev => 
           prev.map(f => 
             f.id === uploadFile.id 
-              ? { ...f, status: 'success', progress: 100 }
+              ? { 
+                  ...f, 
+                  status: 'processing', 
+                  progress: 100,
+                  documentId: result.document.id,
+                  processingProgress: {
+                    stage: 'processing',
+                    progress: 10,
+                    message: 'Starting OCR processing...',
+                    timestamp: new Date().toISOString()
+                  }
+                }
               : f
           )
         );
@@ -169,6 +226,30 @@ const Upload: React.FC = () => {
       case 'completed': return 'bg-green-100 text-green-800';
       default: return 'bg-slate-100 text-slate-800';
     }
+  };
+
+  const getFileStatusIcon = (uploadFile: UploadedFile) => {
+    switch (uploadFile.status) {
+      case 'pending':
+        return <Clock className="text-slate-400" size={20} />;
+      case 'uploading':
+        return <div className="animate-spin rounded-full h-5 w-5 border-2 border-blue-600 border-t-transparent" />;
+      case 'processing':
+        return <RefreshCw className="animate-spin text-yellow-600" size={20} />;
+      case 'success':
+        return <Check className="text-green-500" size={20} />;
+      case 'error':
+        return <AlertCircle className="text-red-500" size={20} />;
+      default:
+        return null;
+    }
+  };
+
+  const getProcessingMessage = (uploadFile: UploadedFile) => {
+    if (uploadFile.status === 'processing' && uploadFile.processingProgress) {
+      return uploadFile.processingProgress.message;
+    }
+    return null;
   };
 
   const activeSessions = sessions.filter(s => s.status !== 'completed' && s.status !== 'frozen');
@@ -317,7 +398,7 @@ const Upload: React.FC = () => {
                 </h3>
                 <p className="text-slate-500">
                   {isUploading 
-                    ? 'Please wait while files are being uploaded' 
+                    ? 'Please wait while files are being uploaded and processed' 
                     : 'Choose an existing session or create a new one to upload files'
                   }
                 </p>
@@ -350,6 +431,7 @@ const Upload: React.FC = () => {
                       {formatFileSize(uploadFile.file.size)}
                     </p>
                     
+                    {/* Upload Progress */}
                     {uploadFile.status === 'uploading' && (
                       <div className="mt-2">
                         <div className="bg-slate-200 rounded-full h-2">
@@ -361,24 +443,38 @@ const Upload: React.FC = () => {
                       </div>
                     )}
 
+                    {/* Processing Progress */}
+                    {uploadFile.status === 'processing' && uploadFile.processingProgress && (
+                      <div className="mt-2">
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="text-slate-600">Processing...</span>
+                          <span className="text-slate-600">{uploadFile.processingProgress.progress}%</span>
+                        </div>
+                        <div className="bg-slate-200 rounded-full h-2">
+                          <div
+                            className="bg-yellow-500 h-2 rounded-full transition-all duration-300"
+                            style={{ width: `${uploadFile.processingProgress.progress}%` }}
+                          />
+                        </div>
+                        <p className="text-xs text-slate-600 mt-1">
+                          {uploadFile.processingProgress.message}
+                        </p>
+                      </div>
+                    )}
+
                     {uploadFile.error && (
                       <p className="text-sm text-red-600 mt-1">{uploadFile.error}</p>
+                    )}
+
+                    {getProcessingMessage(uploadFile) && (
+                      <p className="text-xs text-yellow-600 mt-1">
+                        {getProcessingMessage(uploadFile)}
+                      </p>
                     )}
                   </div>
                   
                   <div className="flex-shrink-0 flex items-center space-x-2">
-                    {uploadFile.status === 'pending' && (
-                      <Clock className="text-slate-400" size={20} />
-                    )}
-                    {uploadFile.status === 'uploading' && (
-                      <div className="animate-spin rounded-full h-5 w-5 border-2 border-blue-600 border-t-transparent" />
-                    )}
-                    {uploadFile.status === 'success' && (
-                      <Check className="text-green-500" size={20} />
-                    )}
-                    {uploadFile.status === 'error' && (
-                      <AlertCircle className="text-red-500" size={20} />
-                    )}
+                    {getFileStatusIcon(uploadFile)}
                     
                     {uploadFile.status === 'pending' && !isUploading && (
                       <button

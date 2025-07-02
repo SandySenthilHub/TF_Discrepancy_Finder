@@ -37,6 +37,20 @@ const upload = multer({
   }
 });
 
+// In-memory store for processing progress (in production, use Redis or database)
+const processingProgress = new Map();
+
+// Helper function to update processing progress
+const updateProgress = (documentId, stage, progress, message) => {
+  processingProgress.set(documentId, {
+    stage,
+    progress,
+    message,
+    timestamp: new Date().toISOString()
+  });
+  console.log(`Progress Update - Document ${documentId}: ${stage} (${progress}%) - ${message}`);
+};
+
 // Upload document to session with automatic OCR processing
 router.post('/upload/:sessionId', authenticateToken, upload.single('document'), async (req, res) => {
   try {
@@ -67,6 +81,9 @@ router.post('/upload/:sessionId', authenticateToken, upload.single('document'), 
 
     const document = await DocumentModel.uploadDocument(documentData);
     
+    // Initialize progress tracking
+    updateProgress(document.id, 'uploaded', 0, 'Document uploaded successfully');
+    
     // Update session status to uploading
     await SessionModel.updateSessionStatus(sessionId, 'uploading');
 
@@ -77,6 +94,9 @@ router.post('/upload/:sessionId', authenticateToken, upload.single('document'), 
     setImmediate(async () => {
       try {
         console.log(`Starting automatic OCR processing for document: ${document.id}`);
+        
+        // Update progress: Starting processing
+        updateProgress(document.id, 'processing', 10, 'Starting OCR processing...');
         
         // Update session status to processing
         await SessionModel.updateSessionStatus(sessionId, 'processing');
@@ -89,13 +109,22 @@ router.post('/upload/:sessionId', authenticateToken, upload.single('document'), 
         console.log(`Split into ${ocrResult.splitResult?.splitCount || 1} documents`);
         console.log(`Fields extracted: ${ocrResult.extractedFields?.length || 0}`);
         
+        // Update progress: Completed
+        updateProgress(document.id, 'completed', 100, 'Processing completed successfully');
+        
         // Update session status based on processing result
         if (ocrResult.documentType !== 'Unknown') {
           await SessionModel.updateSessionStatus(sessionId, 'reviewing');
         }
         
+        // Clean up progress after 5 minutes
+        setTimeout(() => {
+          processingProgress.delete(document.id);
+        }, 5 * 60 * 1000);
+        
       } catch (error) {
         console.error('Automatic OCR processing failed:', error);
+        updateProgress(document.id, 'error', 0, `Processing failed: ${error.message}`);
         await DocumentModel.updateDocumentStatus(document.id, 'error');
       }
     });
@@ -113,13 +142,81 @@ router.post('/upload/:sessionId', authenticateToken, upload.single('document'), 
   }
 });
 
-router.get('/:id/status', async (req, res) => {
+// Get processing progress for a document
+router.get('/:documentId/progress', authenticateToken, async (req, res) => {
+  try {
+    const documentId = req.params.documentId;
+    
+    // Get document to verify access
+    const document = await DocumentModel.getDocumentById(documentId);
+    if (!document) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    
+    // Verify session access
+    const session = await SessionModel.getSessionById(document.sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    if (req.user.role !== 'admin' && session.userId !== req.user.userId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Get progress from memory store
+    const progress = processingProgress.get(documentId);
+    
+    if (!progress) {
+      // If no progress found, check document status
+      const currentStatus = document.status;
+      let defaultProgress = {
+        stage: currentStatus,
+        progress: 0,
+        message: 'No processing information available',
+        timestamp: new Date().toISOString()
+      };
+      
+      switch (currentStatus) {
+        case 'uploaded':
+          defaultProgress = { ...defaultProgress, progress: 0, message: 'Document uploaded, waiting for processing' };
+          break;
+        case 'processing':
+          defaultProgress = { ...defaultProgress, progress: 50, message: 'Processing in progress...' };
+          break;
+        case 'processed':
+          defaultProgress = { ...defaultProgress, progress: 100, message: 'Processing completed' };
+          break;
+        case 'error':
+          defaultProgress = { ...defaultProgress, progress: 0, message: 'Processing failed' };
+          break;
+      }
+      
+      return res.json(defaultProgress);
+    }
+    
+    res.json(progress);
+  } catch (error) {
+    console.error('Error fetching progress:', error);
+    res.status(500).json({ error: 'Failed to fetch progress' });
+  }
+});
+
+// Get document status (enhanced with progress info)
+router.get('/:id/status', authenticateToken, async (req, res) => {
   try {
     const document = await DocumentModel.getDocumentById(req.params.id);
     if (!document) {
       return res.status(404).json({ error: 'Document not found' });
     }
-    return res.json({ status: document.status });
+    
+    // Get progress information
+    const progress = processingProgress.get(req.params.id);
+    
+    return res.json({ 
+      status: document.status,
+      progress: progress || null,
+      updatedAt: document.uploadedAt
+    });
   } catch (error) {
     console.error('Error fetching document status:', error);
     res.status(500).json({ error: 'Failed to fetch document status' });
@@ -142,7 +239,14 @@ router.get('/session/:sessionId', authenticateToken, async (req, res) => {
     }
 
     const documents = await DocumentModel.getDocumentsBySession(sessionId);
-    res.json(documents);
+    
+    // Enhance documents with progress information
+    const enhancedDocuments = documents.map(doc => ({
+      ...doc,
+      progress: processingProgress.get(doc.id) || null
+    }));
+    
+    res.json(enhancedDocuments);
   } catch (error) {
     console.error('Error fetching documents:', error);
     res.status(500).json({ error: 'Failed to fetch documents' });
@@ -175,6 +279,9 @@ router.delete('/:documentId', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Cannot delete documents from frozen or completed sessions' });
     }
     
+    // Clean up progress tracking
+    processingProgress.delete(documentId);
+    
     // Delete the document
     const result = await DocumentModel.deleteDocument(documentId);
     
@@ -203,33 +310,46 @@ router.post('/:documentId/process', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Document not found' });
     }
     
+    // Initialize progress tracking
+    updateProgress(documentId, 'processing', 10, 'Starting manual processing...');
+    
     // Update document status to processing
     await DocumentModel.updateDocumentStatus(documentId, 'processing');
     
-    // Process document with OCR and splitting
-    const processedData = await processDocument(documentId);
-    
-    // Update document status to processed
-    await DocumentModel.updateDocumentStatus(documentId, 'processed');
-    
-    res.json({
-      message: 'Document processed successfully with form splitting',
-      data: {
-        documentId: documentId,
-        documentType: processedData.documentType,
-        extractedText: processedData.extractedText,
-        extractedFields: processedData.extractedFields,
-        confidence: processedData.confidence,
-        splitResult: processedData.splitResult,
-        splitDocuments: processedData.splitDocuments,
-        structuredData: processedData.structuredData
+    // Start processing in background
+    setImmediate(async () => {
+      try {
+        // Process document with OCR and splitting
+        const processedData = await processDocument(documentId);
+        
+        // Update document status to processed
+        await DocumentModel.updateDocumentStatus(documentId, 'processed');
+        
+        // Update progress: Completed
+        updateProgress(documentId, 'completed', 100, 'Manual processing completed successfully');
+        
+        // Clean up progress after 5 minutes
+        setTimeout(() => {
+          processingProgress.delete(documentId);
+        }, 5 * 60 * 1000);
+        
+      } catch (error) {
+        console.error('Manual processing failed:', error);
+        updateProgress(documentId, 'error', 0, `Processing failed: ${error.message}`);
+        await DocumentModel.updateDocumentStatus(documentId, 'error');
       }
     });
+    
+    res.json({
+      message: 'Document processing started successfully',
+      documentId: documentId,
+      status: 'processing'
+    });
   } catch (error) {
-    console.error('Error processing document:', error);
-    await DocumentModel.updateDocumentStatus(req.params.documentId, 'error');
+    console.error('Error starting document processing:', error);
+    updateProgress(req.params.documentId, 'error', 0, `Failed to start processing: ${error.message}`);
     res.status(500).json({ 
-      error: 'Failed to process document',
+      error: 'Failed to start document processing',
       details: error.message 
     });
   }
@@ -281,22 +401,44 @@ router.post('/:documentId/reprocess', authenticateToken, async (req, res) => {
     
     console.log(`Reprocessing document: ${documentId}`);
     
+    // Initialize progress tracking
+    updateProgress(documentId, 'reprocessing', 10, 'Starting reprocessing...');
+    
     // Update document status to processing
     await DocumentModel.updateDocumentStatus(documentId, 'processing');
     
-    // Reprocess the document
-    const reprocessedData = await reprocessDocument(documentId);
-    
-    // Update document status to processed
-    await DocumentModel.updateDocumentStatus(documentId, 'processed');
+    // Start reprocessing in background
+    setImmediate(async () => {
+      try {
+        // Reprocess the document
+        const reprocessedData = await reprocessDocument(documentId);
+        
+        // Update document status to processed
+        await DocumentModel.updateDocumentStatus(documentId, 'processed');
+        
+        // Update progress: Completed
+        updateProgress(documentId, 'completed', 100, 'Reprocessing completed successfully');
+        
+        // Clean up progress after 5 minutes
+        setTimeout(() => {
+          processingProgress.delete(documentId);
+        }, 5 * 60 * 1000);
+        
+      } catch (error) {
+        console.error('Reprocessing failed:', error);
+        updateProgress(documentId, 'error', 0, `Reprocessing failed: ${error.message}`);
+        await DocumentModel.updateDocumentStatus(documentId, 'error');
+      }
+    });
     
     res.json({
-      message: 'Document reprocessed successfully with form splitting',
-      data: reprocessedData
+      message: 'Document reprocessing started successfully',
+      documentId: documentId,
+      status: 'processing'
     });
   } catch (error) {
     console.error('Error reprocessing document:', error);
-    await DocumentModel.updateDocumentStatus(req.params.documentId, 'error');
+    updateProgress(req.params.documentId, 'error', 0, `Failed to start reprocessing: ${error.message}`);
     res.status(500).json({ 
       error: 'Failed to reprocess document',
       details: error.message 
@@ -425,4 +567,6 @@ router.post('/:documentId/request-approval', authenticateToken, async (req, res)
   }
 });
 
+// Export the progress update function for use in OCR service
+export { updateProgress };
 export default router;
