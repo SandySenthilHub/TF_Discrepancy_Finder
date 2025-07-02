@@ -81,12 +81,13 @@ router.post('/upload/:sessionId', authenticateToken, upload.single('document'), 
         // Update session status to processing
         await SessionModel.updateSessionStatus(sessionId, 'processing');
         
-        // Process the document with OCR
+        // Process the document with OCR and splitting
         const ocrResult = await processDocument(document.id);
         
         console.log(`OCR processing completed for document: ${document.id}`);
         console.log(`Document type recognized: ${ocrResult.documentType}`);
-        console.log(`Fields extracted: ${ocrResult.extractedFields.length}`);
+        console.log(`Split into ${ocrResult.splitResult?.splitCount || 1} documents`);
+        console.log(`Fields extracted: ${ocrResult.extractedFields?.length || 0}`);
         
         // Update session status based on processing result
         if (ocrResult.documentType !== 'Unknown') {
@@ -100,7 +101,7 @@ router.post('/upload/:sessionId', authenticateToken, upload.single('document'), 
     });
 
     res.status(201).json({
-      message: 'Document uploaded successfully. OCR processing started automatically.',
+      message: 'Document uploaded successfully. OCR processing and splitting started automatically.',
       document: {
         ...document,
         status: 'processing' // Indicate that processing has started
@@ -205,20 +206,22 @@ router.post('/:documentId/process', authenticateToken, async (req, res) => {
     // Update document status to processing
     await DocumentModel.updateDocumentStatus(documentId, 'processing');
     
-    // Process document with OCR
+    // Process document with OCR and splitting
     const processedData = await processDocument(documentId);
     
     // Update document status to processed
     await DocumentModel.updateDocumentStatus(documentId, 'processed');
     
     res.json({
-      message: 'Document processed successfully',
+      message: 'Document processed successfully with form splitting',
       data: {
         documentId: documentId,
         documentType: processedData.documentType,
         extractedText: processedData.extractedText,
         extractedFields: processedData.extractedFields,
         confidence: processedData.confidence,
+        splitResult: processedData.splitResult,
+        splitDocuments: processedData.splitDocuments,
         structuredData: processedData.structuredData
       }
     });
@@ -244,13 +247,26 @@ router.get('/:documentId/ocr', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'OCR results not found. Process the document first.' });
     }
     
+    // Parse split documents if available
+    let splitDocuments = [];
+    try {
+      if (cleanedDoc.cleanedContent && cleanedDoc.cleanedContent.startsWith('[')) {
+        splitDocuments = JSON.parse(cleanedDoc.cleanedContent);
+      }
+    } catch (parseError) {
+      console.log('No split documents found, using regular content');
+    }
+    
     res.json({
       documentId: documentId,
-      extractedText: cleanedDoc.cleanedContent,
+      extractedText: splitDocuments.length > 0 ? 
+        splitDocuments.map(doc => doc.content).join('\n\n---\n\n') : 
+        cleanedDoc.cleanedContent,
       extractedFields: JSON.parse(cleanedDoc.extractedFields || '[]'),
       documentType: cleanedDoc.matchedTemplate,
       isNewDocument: cleanedDoc.isNewDocument,
-      processedAt: cleanedDoc.processedAt
+      processedAt: cleanedDoc.processedAt,
+      splitDocuments: splitDocuments.length > 0 ? splitDocuments : null
     });
   } catch (error) {
     console.error('Error fetching OCR results:', error);
@@ -275,7 +291,7 @@ router.post('/:documentId/reprocess', authenticateToken, async (req, res) => {
     await DocumentModel.updateDocumentStatus(documentId, 'processed');
     
     res.json({
-      message: 'Document reprocessed successfully',
+      message: 'Document reprocessed successfully with form splitting',
       data: reprocessedData
     });
   } catch (error) {

@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { DocumentModel } from '../models/Document.js';
+import { splitDocumentByFormType } from './documentSplitter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -72,27 +73,42 @@ export const processDocument = async (documentId) => {
 
     console.log(`Extracted text length: ${extractedText.length} characters`);
 
-    // Recognize document type
-    const documentType = recognizeDocumentTypeFromText(extractedText);
-    console.log(`Recognized document type: ${documentType}`);
+    // Split document by form type
+    console.log('Starting document splitting by form type...');
+    const splitResult = await splitDocumentByFormType(documentId, extractedText);
+    
+    console.log(`Document split into ${splitResult.splitCount} sections`);
 
-    // Split and structure the form based on type
-    const structuredData = splitFormByType(extractedText, documentType);
+    // Process each split document
+    const processedSplits = [];
+    for (const splitDoc of splitResult.splitDocuments) {
+      const processedSplit = {
+        ...splitDoc,
+        structuredData: splitFormByType(splitDoc.content, splitDoc.documentType),
+        confidence: calculateOverallConfidence(splitDoc.extractedFields)
+      };
+      processedSplits.push(processedSplit);
+    }
 
-    // Extract fields based on document type
-    const extractedFields = extractFieldsByType(extractedText, documentType, documentId);
-
-    console.log(`Extracted ${extractedFields.length} fields`);
-
-    // Save cleaned document data
+    // Save cleaned document data with split information
     const cleanedData = {
       documentId: documentId,
       sessionId: document.sessionId,
       cleanedContent: extractedText,
-      extractedFields: extractedFields,
-      matchedTemplate: documentType,
-      isNewDocument: documentType === 'Unknown',
-      structuredData: structuredData
+      extractedFields: splitResult.splitDocuments.flatMap(doc => 
+        doc.extractedFields.map((field, index) => ({
+          ...field,
+          id: `field_${documentId}_split_${doc.splitIndex}_${index}`,
+          documentId: documentId,
+          splitDocumentId: doc.id,
+          position: { x: 0, y: index * 30, width: 200, height: 25 },
+          isValidated: false,
+          isEdited: false
+        }))
+      ),
+      matchedTemplate: splitResult.splitCount > 1 ? 'Multi-Form Document' : splitResult.splitDocuments[0]?.documentType || 'Unknown',
+      isNewDocument: false,
+      splitDocuments: processedSplits
     };
 
     try {
@@ -110,14 +126,14 @@ export const processDocument = async (documentId) => {
 
     return {
       success: true,
-      data: {
-        documentId: documentId,
-        extractedText: extractedText,
-        documentType: documentType,
-        extractedFields: extractedFields,
-        structuredData: structuredData,
-        confidence: calculateOverallConfidence(extractedFields)
-      }
+      documentId: documentId,
+      extractedText: extractedText,
+      splitResult: splitResult,
+      splitDocuments: processedSplits,
+      documentType: cleanedData.matchedTemplate,
+      extractedFields: cleanedData.extractedFields,
+      confidence: calculateOverallConfidence(cleanedData.extractedFields),
+      processingTime: new Date().toISOString()
     };
 
   } catch (error) {
@@ -215,6 +231,55 @@ Terms and Conditions:
 - Presentation period: 21 days after shipment date
 
 This credit is subject to UCP 600.
+
+---
+
+COMMERCIAL INVOICE
+
+Invoice Number: INV-${Math.random().toString().substr(2, 6)}
+Invoice Date: ${new Date().toLocaleDateString()}
+
+Sold To:
+XYZ Import Corporation
+456 Commerce Avenue
+Import Town, IT 67890
+
+Ship To:
+Same as above
+
+Description of Goods:
+Electronic Components - Model EC-2024
+Quantity: 1000 units
+Unit Price: USD 50.00
+Total Amount: USD 50,000.00
+
+Terms: FOB Shanghai
+Payment: Letter of Credit
+
+Shipper: ABC Trading Company Limited
+
+---
+
+BILL OF LADING
+
+B/L Number: BL${Math.random().toString().substr(2, 8)}
+Vessel: MV TRADE CARRIER
+Voyage: TC-2024-${Math.random().toString().substr(2, 3)}
+
+Port of Loading: Shanghai, China
+Port of Discharge: Los Angeles, USA
+
+Shipper: ABC Trading Company Limited
+Consignee: XYZ Import Corporation
+Notify Party: Same as Consignee
+
+Description of Goods:
+1000 CTNS Electronic Components
+Gross Weight: 5000 KGS
+Measurement: 50 CBM
+
+Freight: PREPAID
+Shipped on Board: ${new Date().toLocaleDateString()}
     `;
   } else if (name.includes('invoice')) {
     return `
@@ -400,111 +465,6 @@ const splitGenericDocument = (lines) => {
   ];
 };
 
-const extractFieldsByType = (text, documentType, documentId) => {
-  const template = DOCUMENT_TEMPLATES[documentType];
-  if (!template) {
-    return extractGenericFields(text, documentId);
-  }
-
-  const extractedFields = [];
-  const lines = text.split('\n');
-
-  template.fields.forEach((fieldName, index) => {
-    const fieldValue = extractFieldValue(text, fieldName);
-    if (fieldValue) {
-      extractedFields.push({
-        id: `field_${documentId}_${index}`,
-        documentId: documentId,
-        fieldName: fieldName,
-        fieldValue: fieldValue,
-        confidence: calculateFieldConfidence(fieldValue, fieldName),
-        position: { x: 0, y: index * 30, width: 200, height: 25 },
-        isValidated: false,
-        isEdited: false
-      });
-    }
-  });
-
-  // If no fields were extracted using templates, fall back to generic extraction
-  if (extractedFields.length === 0) {
-    return extractGenericFields(text, documentId);
-  }
-
-  return extractedFields;
-};
-
-const extractFieldValue = (text, fieldName) => {
-  const patterns = {
-    'LC Number': /(?:lc|letter of credit)\s*(?:number|no\.?|#)?\s*:?\s*([A-Z0-9]+)/i,
-    'Issue Date': /(?:issue|issued|invoice)\s*(?:date|on)?\s*:?\s*(\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{4}-\d{2}-\d{2})/i,
-    'Expiry Date': /(?:expiry|expires?|expiration)\s*(?:date|on)?\s*:?\s*(\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{4}-\d{2}-\d{2})/i,
-    'Amount': /(?:amount|value|total)\s*:?\s*([A-Z]{3}\s*[\d,]+\.?\d*)/i,
-    'Beneficiary': /beneficiary\s*:?\s*([^\n]+)/i,
-    'Applicant': /applicant\s*:?\s*([^\n]+)/i,
-    'B/L Number': /(?:b\/l|bill of lading)\s*(?:number|no\.?|#)?\s*:?\s*([A-Z0-9]+)/i,
-    'Invoice Number': /invoice\s*(?:number|no\.?|#)?\s*:?\s*([A-Z0-9\-]+)/i,
-    'Total Amount': /total\s*(?:amount|value)?\s*:?\s*([A-Z]{3}\s*[\d,]+\.?\d*)/i,
-    'Vessel': /vessel\s*:?\s*([^\n]+)/i,
-    'Port of Loading': /port of loading\s*:?\s*([^\n]+)/i,
-    'Port of Discharge': /port of discharge\s*:?\s*([^\n]+)/i
-  };
-
-  const pattern = patterns[fieldName];
-  if (pattern) {
-    const match = text.match(pattern);
-    return match ? match[1].trim() : null;
-  }
-
-  // Generic extraction for unknown fields
-  const genericPattern = new RegExp(`${fieldName}\\s*:?\\s*([^\\n]+)`, 'i');
-  const match = text.match(genericPattern);
-  return match ? match[1].trim() : null;
-};
-
-const extractGenericFields = (text, documentId) => {
-  const lines = text.split('\n').filter(line => line.trim());
-  const fields = [];
-
-  lines.forEach((line, index) => {
-    if (line.includes(':')) {
-      const [key, value] = line.split(':').map(s => s.trim());
-      if (key && value && value.length > 0) {
-        fields.push({
-          id: `generic_field_${documentId}_${index}`,
-          documentId: documentId,
-          fieldName: key,
-          fieldValue: value,
-          confidence: 0.7,
-          position: { x: 0, y: index * 25, width: 200, height: 20 },
-          isValidated: false,
-          isEdited: false
-        });
-      }
-    }
-  });
-
-  return fields;
-};
-
-const calculateFieldConfidence = (value, fieldName) => {
-  if (!value) return 0;
-
-  let confidence = 0.5; // Base confidence
-
-  // Increase confidence based on field type patterns
-  if (fieldName.toLowerCase().includes('date') && /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}/.test(value)) {
-    confidence += 0.3;
-  }
-  if (fieldName.toLowerCase().includes('amount') && /[A-Z]{3}\s*[\d,]+\.?\d*/.test(value)) {
-    confidence += 0.3;
-  }
-  if (fieldName.toLowerCase().includes('number') && /[A-Z0-9\-]+/.test(value)) {
-    confidence += 0.2;
-  }
-
-  return Math.min(confidence, 1.0);
-};
-
 const calculateOverallConfidence = (fields) => {
   if (fields.length === 0) return 0;
   const totalConfidence = fields.reduce((sum, field) => sum + field.confidence, 0);
@@ -527,8 +487,8 @@ export const reprocessDocument = async (documentId) => {
         id: `iteration_${Date.now()}`,
         documentId: documentId,
         iterationNumber: 1, // This would be incremented properly
-        ocrResult: result.data.extractedText,
-        extractedFields: result.data.extractedFields,
+        ocrResult: result.extractedText,
+        extractedFields: result.extractedFields,
         createdAt: new Date().toISOString(),
         status: 'completed'
       }
