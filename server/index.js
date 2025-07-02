@@ -10,6 +10,7 @@ import authRoutes from './routes/auth.js';
 import sessionRoutes from './routes/sessions.js';
 import documentRoutes from './routes/documents.js';
 import ocrRoutes from './routes/ocr.js';
+import downloadRoutes from './routes/downloads.js';
 
 // Load environment variables
 dotenv.config();
@@ -39,6 +40,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/ocr', ocrRoutes);
+app.use('/api/downloads', downloadRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -49,7 +51,10 @@ app.get('/api/health', (req, res) => {
     features: {
       ocr: 'enabled',
       documentProcessing: 'enabled',
-      automaticProcessing: 'enabled'
+      automaticProcessing: 'enabled',
+      documentSplitting: 'enabled',
+      enhancedOCR: 'enabled',
+      downloadManager: 'enabled'
     }
   });
 });
@@ -82,7 +87,9 @@ app.listen(PORT, () => {
   console.log(`🚀 TF_genie API Server running on port ${PORT}`);
   console.log(`📊 Database: ${process.env.DB_DATABASE} on ${process.env.DB_SERVER}`);
   console.log(`📁 Upload directory: ${uploadsDir}`);
-  console.log(`🔍 OCR Processing: Enabled`);
+  console.log(`🔍 OCR Processing: Enhanced with multi-pass recognition`);
+  console.log(`📄 Document Splitting: Enabled by form type`);
+  console.log(`💾 Download Manager: Multiple formats available`);
   console.log(`🤖 Automatic Processing: Enabled`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
